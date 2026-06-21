@@ -54,6 +54,7 @@ function createSettingsEffectRouter(options = {}) {
   const applyDockVisibility = options.applyDockVisibility || noop;
   const sendToRenderer = options.sendToRenderer || noop;
   const sendDashboardI18n = options.sendDashboardI18n || noop;
+  const sendTodoI18n = options.sendTodoI18n || noop;
   const sendSessionHudI18n = options.sendSessionHudI18n || noop;
   const emitSessionSnapshot = options.emitSessionSnapshot || noop;
   const cleanStaleSessions = options.cleanStaleSessions || noop;
@@ -104,6 +105,7 @@ function createSettingsEffectRouter(options = {}) {
     }
     if ("lang" in changes) {
       safeCall(logWarn, "Clawd: dashboard lang broadcast failed:", sendDashboardI18n);
+      safeCall(logWarn, "Clawd: todo lang broadcast failed:", sendTodoI18n);
       safeCall(logWarn, "Clawd: session HUD lang broadcast failed:", sendSessionHudI18n);
     }
     if ("sessionAliases" in changes) {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, clipboard } = require("electron");
+const { app, BrowserWindow, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, clipboard, Notification } = require("electron");
 // ── Linux/Wayland: relaunch under XWayland so the pet is draggable (issue #441) ──
 // Native Wayland ignores client-side window positioning and blocks global cursor
 // queries, so the pet spawns centered, can't be dragged, and has no tracking;
@@ -216,6 +216,7 @@ const {
 } = require("./bubble-policy");
 const loginItemHelpers = require("./login-item");
 const PREFS_PATH = path.join(app.getPath("userData"), "clawd-prefs.json");
+const TODO_PATH = path.join(__dirname, "..", "clawd-todos.md");
 const _initialPrefsLoad = prefsModule.load(PREFS_PATH);
 
 // Lazy helpers — these run inside the action `effect` callbacks at click time,
@@ -861,6 +862,13 @@ function applyTextScaleNow() {
   } catch (err) {
     console.warn("Clawd: dashboard text scale failed:", err && err.message);
   }
+  try {
+    if (_todo && typeof _todo.applyTextScaleToWindow === "function") {
+      _todo.applyTextScaleToWindow();
+    }
+  } catch (err) {
+    console.warn("Clawd: todo text scale failed:", err && err.message);
+  }
   repositionAnchoredFloatingSurfaces();
 }
 
@@ -1317,6 +1325,8 @@ function syncSessionHudVisibilityAndBubbles() {
 let showDashboard = () => {};
 let broadcastDashboardSessionSnapshot = () => {};
 let sendDashboardI18n = () => {};
+let showTodo = () => {};
+let sendTodoI18n = () => {};
 
 // Forward hook for the #329 updater scheduler. State/mini ctxs reference
 // this via notifyUpdaterSilentExit; the actual implementation is wired
@@ -1601,6 +1611,21 @@ const _dashboard = require("./dashboard")({
 showDashboard = _dashboard.showDashboard;
 broadcastDashboardSessionSnapshot = _dashboard.broadcastSessionSnapshot;
 sendDashboardI18n = _dashboard.sendI18n;
+
+const _todo = require("./todo")({
+  get lang() { return lang; },
+  t: (key) => translate(key),
+  getI18n: () => getDashboardI18nPayload(),
+  getPetWindowBounds,
+  getNearestWorkArea,
+  getSettingsWindow: () => settingsWindowRuntime.getWindow(),
+  getTextScale: () => effectiveTextScaleForKey(
+    getWindowDisplayKey(_todo ? _todo.getWindow() : null) || getPetDisplayKey()
+  ),
+  iconPath: settingsWindowRuntime.getIconPath(),
+});
+showTodo = _todo.showTodo;
+sendTodoI18n = _todo.sendI18n;
 
 // ── First-run onboarding tutorial ──
 // Buckets the installable agents for the tutorial's step 2. We call the
@@ -2863,6 +2888,7 @@ const _menuCtx = {
   checkForUpdates: (...args) => checkForUpdates(...args),
   getUpdateMenuItem: () => getUpdateMenuItem(),
   openDashboard: () => showDashboard(),
+  openTodo: () => showTodo(),
   launchClaudeSession: (mode, cwd, sessionId) => launchClaudeSession(mode, cwd, sessionId),
   newSessionWithFolder: async (t) => {
     const parent = win && !win.isDestroyed() ? win : null;
@@ -3003,6 +3029,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   applyDockVisibility,
   sendToRenderer,
   sendDashboardI18n: () => sendDashboardI18n(),
+  sendTodoI18n: () => sendTodoI18n(),
   sendSessionHudI18n: () => sendSessionHudI18n(),
   emitSessionSnapshot: (options) => _state.emitSessionSnapshot(options),
   cleanStaleSessions: () => _state.cleanStaleSessions(),
@@ -3268,6 +3295,83 @@ registerSessionIpc({
   },
   getLanWsServer: () => _lanWss,
 });
+
+const { registerTodoIpc, readTodosFromFile, writeTodosToFile } = require("./todo-ipc");
+registerTodoIpc({
+  ipcMain,
+  getI18n: () => getDashboardI18nPayload(),
+  todoFilePath: TODO_PATH,
+  onTodosChanged: () => {
+    try { checkTodoReminders(); } catch (err) { console.warn("Clawd: todo reminder check failed:", err && err.message); }
+  },
+});
+
+// ── Todo reminder scheduler ──
+// Checks every 5 minutes. Fires a system notification + pet animation for:
+//   - tasks due in ≤ 60 min (once, marked reminded1h)
+//   - tasks due in ≤ 15 min (once, marked reminded15m)
+function checkTodoReminders() {
+  let todos;
+  try { todos = readTodosFromFile(TODO_PATH); }
+  catch (err) { console.warn("Clawd: todo reminder read failed:", err && err.message); return; }
+
+  const now = Date.now();
+  let changed = false;
+
+  for (const todo of todos) {
+    if (todo.completed || !todo.deadline) continue;
+    const deadlineMs = new Date(todo.deadline).getTime();
+    if (isNaN(deadlineMs) || deadlineMs <= now) continue;
+
+    const diffMin = (deadlineMs - now) / 60000;
+
+    // 1-hour reminder: fire when 45 < diffMin ≤ 65 (catches the 5-min polling window around 60min)
+    if (!todo.reminded1h && diffMin > 10 && diffMin <= 65) {
+      todo.reminded1h = true;
+      changed = true;
+      fireTodoReminder(todo, "1h");
+    }
+
+    // 15-min reminder: fire when diffMin ≤ 15
+    if (!todo.reminded15m && diffMin <= 15) {
+      todo.reminded15m = true;
+      changed = true;
+      fireTodoReminder(todo, "15m");
+    }
+  }
+
+  if (changed) {
+    try { writeTodosToFile(TODO_PATH, todos); }
+    catch (err) { console.warn("Clawd: todo reminder write failed:", err && err.message); }
+  }
+}
+
+function fireTodoReminder(todo, type) {
+  const label = type === "1h" ? "1 小时后到期" : "15 分钟后到期";
+
+  // System notification
+  try {
+    if (Notification.isSupported()) {
+      const notif = new Notification({
+        title: `待办提醒：${label}`,
+        body: todo.content,
+        silent: false,
+      });
+      notif.show();
+    }
+  } catch (err) {
+    console.warn("Clawd: todo notification failed:", err && err.message);
+  }
+
+  // Pet animation: trigger notification/attention state
+  try {
+    if (_state && typeof _state.applyState === "function") {
+      _state.applyState("notification");
+    }
+  } catch (err) {
+    console.warn("Clawd: todo pet animation failed:", err && err.message);
+  }
+}
 
 function createWindow() {
   // Read everything from the settings controller. The mirror caches above
@@ -3746,6 +3850,12 @@ if (!gotTheLock) {
     // and startUpdateScheduler() short-circuits on !app.isPackaged.
     try { reconcilePendingOnStartup(); } catch (err) { updateLog(`reconcile failed: ${err && err.message}`); }
     try { startUpdateScheduler(); } catch (err) { updateLog(`scheduler start failed: ${err && err.message}`); }
+
+    // Start todo reminder polling: check 30s after startup, then every 5 minutes
+    setTimeout(() => {
+      checkTodoReminders();
+      setInterval(checkTodoReminders, 5 * 60 * 1000);
+    }, 30 * 1000);
   });
 
   app.on("before-quit", () => {
