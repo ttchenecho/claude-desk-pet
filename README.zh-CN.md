@@ -1,3 +1,8 @@
+> **这是原项目 [clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk) 的个人 fork。**  
+> 我在原版基础上新增了**待办事项功能**：支持添加、编辑、删除任务，设置截止时间，勾选完成后有划线淡出动画。
+
+---
+
 <p align="center">
   <img src="assets/tray-icon.png" width="128" alt="Clawd">
 </p>
